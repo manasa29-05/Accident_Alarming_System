@@ -1,261 +1,98 @@
-// Accident Alarming System - Arduino sketch
-// Hardware: Arduino UNO, ADXL-like accelerometer (analog), NEO-6M GPS, SIM800L GSM, buzzer, button
-// Author: adapted from your project report. Replace EMERGENCY_PHONE and tune sensitivity as needed.
+import math
+import random
+import time
+import os
+from dotenv import load_dotenv
+from twilio.rest import Client
 
-#include <AltSoftSerial.h>
-#include <TinyGPS++.h>
-#include <SoftwareSerial.h>
-#include <Wire.h>
-#include <math.h>
+# Load .env if available
+load_dotenv()
 
-// ----------------- CONFIGURATION -----------------
-const String EMERGENCY_PHONE = "+916309960479"; // <-- REPLACE with actual emergency number
+# ---------------- Configuration ----------------
+ACCIDENT_THRESHOLD = 18.0        # Threshold for impact detection
+POLL_INTERVAL = 1.5              # Seconds between readings
+ALERT_DELAY = 5.0                # Seconds to wait before sending alert
 
-// GSM Serial (SIM800L) connected to Arduino digital pins (use SoftwareSerial)
-#define GSM_RX_PIN 2   // Arduino RX <- SIM800L TX
-#define GSM_TX_PIN 3   // Arduino TX -> SIM800L RX
-SoftwareSerial sim800(GSM_RX_PIN, GSM_TX_PIN);
+# Twilio credentials from environment variables (optional)
+TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_FROM = os.getenv("TWILIO_FROM")
+ALERT_PHONE = os.getenv("ALERT_PHONE")
 
-// GPS Serial (AltSoftSerial uses specific pins on UNO)
-AltSoftSerial neoGPSSerial;
-TinyGPSPlus gps;
+# ---------------- Simulated Sensor & GPS ----------------
+def get_sensor_data():
+    """
+    Simulate accelerometer (ax, ay, az) readings.
+    Occasionally generate a large spike to mimic an accident.
+    """
+    # Normal readings
+    ax = random.uniform(-1, 1)
+    ay = random.uniform(-1, 1)
+    az = random.uniform(-1, 1)
+    # Random accident event (1 in 40)
+    if random.randint(1, 40) == 5:
+        ax = random.uniform(20, 30)
+        ay = random.uniform(20, 30)
+        az = random.uniform(20, 30)
+    return ax, ay, az
 
-// Pins and sensors (analog pins for accelerometer)
-#define BUZZER_PIN 12
-#define BUTTON_PIN 11
-#define X_PIN A1
-#define Y_PIN A2
-#define Z_PIN A3
 
-// Tuning parameters
-int sensitivity = 20;        // impact threshold (tune based on sensor)
-int vibration = 2;           // debounce counter
-int devibrate = 75;          // debounce reset value
-int magnitudeValue = 0;
+def get_gps_location():
+    """
+    Simulate GPS location (latitude, longitude).
+    You can replace this with a real serial read from GPS module.
+    """
+    latitude = round(random.uniform(12.90, 13.05), 6)
+    longitude = round(random.uniform(77.50, 77.70), 6)
+    return latitude, longitude
 
-// Internal state
-byte updateFlag = 0;
-boolean impactDetected = false;
-unsigned long time1_us;
-unsigned long impact_time_ms;
-unsigned long alert_delay_ms = 30000UL; // wait 30s before sending call+sms (as in your document)
 
-// ----------------- SETUP -----------------
-void setup() {
-  Serial.begin(9600);
-  sim800.begin(9600);
-  neoGPSSerial.begin(9600);
+# ---------------- Detection Logic ----------------
+def detect_accident(ax, ay, az, threshold=ACCIDENT_THRESHOLD):
+    """
+    Compute magnitude and check if above threshold.
+    """
+    magnitude = math.sqrt(ax ** 2 + ay ** 2 + az ** 2)
+    return magnitude >= threshold, magnitude
 
-  pinMode(BUZZER_PIN, OUTPUT);
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
 
-  // initialize serial/GSM
-  Serial.println("Initializing SIM800L...");
-  sendAT("AT", "OK", 2000);
-  sendAT("ATE1", "OK", 2000);
-  sendAT("AT+CMGF=1", "OK", 2000);     // text mode
-  sendAT("AT+CNMI=1,1,0,0,0", "OK", 2000); // new message indications
+# ---------------- Notification System ----------------
+def send_sms_alert(lat, lon, magnitude):
+    """
+    Send SMS using Twilio API. If Twilio not configured, just print message.
+    """
+    msg = f"⚠️ Accident Detected! Magnitude: {magnitude:.2f}\nLocation: https://maps.google.com/?q={lat},{lon}"
+    if TWILIO_SID and TWILIO_TOKEN and TWILIO_FROM and ALERT_PHONE:
+        try:
+            client = Client(TWILIO_SID, TWILIO_TOKEN)
+            client.messages.create(to=ALERT_PHONE, from_=TWILIO_FROM, body=msg)
+            print("✅ SMS sent successfully.")
+        except Exception as e:
+            print("❌ Failed to send SMS:", e)
+    else:
+        print("🚨 ALERT:", msg)
 
-  // initialize accelerometer baseline reads
-  time1_us = micros();
-}
 
-// ----------------- MAIN LOOP -----------------
-void loop() {
-  // impact sampling (every ~2 ms in the original code)
-  if (micros() - time1_us > 1999UL) Impact();
+# ---------------- Main Loop ----------------
+def main():
+    print("🚗 Accident Alarming System (Python Version) Started\n")
+    while True:
+        ax, ay, az = get_sensor_data()
+        accident, magnitude = detect_accident(ax, ay, az)
+        print(f"Sensor → ax={ax:.2f}, ay={ay:.2f}, az={az:.2f}, mag={magnitude:.2f}")
 
-  if (updateFlag > 0) {
-    updateFlag = 0;
-    Serial.println("Impact detected!!");
-    Serial.print("Magnitude: ");
-    Serial.println(magnitudeValue);
-    getGps();                     // fetch GPS fix
-    digitalWrite(BUZZER_PIN, HIGH);
-    impactDetected = true;
-    impact_time_ms = millis();
-  }
+        if accident:
+            print("⚠️ Potential accident detected! Waiting for confirmation...")
+            time.sleep(ALERT_DELAY)
+            # Fetch GPS location
+            lat, lon = get_gps_location()
+            send_sms_alert(lat, lon, magnitude)
+            print("System paused for 5 seconds...\n")
+            time.sleep(5)
+        else:
+            time.sleep(POLL_INTERVAL)
 
-  if (impactDetected) {
-    if (millis() - impact_time_ms >= alert_delay_ms) {
-      digitalWrite(BUZZER_PIN, LOW);
-      makeCall();
-      delay(1000);
-      sendAlert();
-      impactDetected = false;
-      impact_time_ms = 0;
-    }
-  }
 
-  // manual reset button: if pressed, stop alert
-  if (digitalRead(BUTTON_PIN) == LOW) {
-    delay(200);
-    digitalWrite(BUZZER_PIN, LOW);
-    impactDetected = false;
-    impact_time_ms = 0;
-    Serial.println("Manual reset pressed - alert cancelled.");
-  }
-
-  // handle incoming data from GSM or USB serial passthrough to SIM800 (optional)
-  while (sim800.available()) {
-    String s = sim800.readString();
-    parseData(s); // process incoming SMS notifications if any
-  }
-  while (Serial.available()) {
-    sim800.println(Serial.readString());
-  }
-}
-
-// ----------------- IMPACT (ACCEL) READING -----------------
-void Impact() {
-  time1_us = micros();
-  static int oldx = 0, oldy = 0, oldz = 0;
-
-  int xaxis = analogRead(X_PIN);
-  int yaxis = analogRead(Y_PIN);
-  int zaxis = analogRead(Z_PIN);
-
-  vibration--;
-  if (vibration < 0) vibration = 0;
-  if (vibration > 0) {
-    // still in debounce period
-    oldx = xaxis; oldy = yaxis; oldz = zaxis;
-    return;
-  }
-
-  int deltx = xaxis - oldx;
-  int delty = yaxis - oldy;
-  int deltz = zaxis - oldz;
-
-  magnitudeValue = sqrt((long)deltx * deltx + (long)delty * delty + (long)deltz * deltz);
-
-  if (magnitudeValue >= sensitivity) {
-    updateFlag = 1;
-    vibration = devibrate;
-  } else {
-    if (magnitudeValue > 15) {
-      Serial.println(magnitudeValue);
-    }
-    magnitudeValue = 0;
-  }
-
-  oldx = xaxis; oldy = yaxis; oldz = zaxis;
-}
-
-// ----------------- PARSE GSM DATA (SMS handling) -----------------
-void parseData(String buff) {
-  Serial.println("SIM800L: " + buff);
-  buff.trim();
-  if (buff.length() == 0) return;
-
-  int index = buff.indexOf("\r");
-  if (index >= 0) buff.remove(0, index + 1);
-  buff.trim();
-
-  if (buff.startsWith("+CMTI")) {
-    // new message indication - extract index
-    int commaIndex = buff.indexOf(",");
-    if (commaIndex > 0) {
-      String idxStr = buff.substring(commaIndex + 1);
-      idxStr.trim();
-      String cmd = "AT+CMGR=" + idxStr;
-      sim800.println(cmd);
-    }
-  } else if (buff.startsWith("+CMGR")) {
-    // message content follows - check for emergency commands
-    if (buff.indexOf("get gps") >= 0) {
-      getGps();
-      String sms_data = "GPS Location Data\r\n";
-      sms_data += "http://maps.google.com/maps?q=loc:";
-      // latitude and longitude variables from getGps must be global/static; here we will construct after getGps
-      // For simplicity getGps() stores to global strings latStr and lonStr
-      extern String latStr, lonStr;
-      sms_data += latStr + "," + lonStr;
-      sendSms(sms_data);
-    }
-  }
-}
-
-// ----------------- GPS FETCH -----------------
-// store GPS coords in globals for SMS
-String latStr = "";
-String lonStr = "";
-
-void getGps() {
-  boolean newData = false;
-  unsigned long start = millis();
-  while (millis() - start < 2000) {
-    while (neoGPSSerial.available()) {
-      if (gps.encode(neoGPSSerial.read())) {
-        newData = true;
-        break;
-      }
-    }
-  }
-  if (newData && gps.location.isValid()) {
-    latStr = String(gps.location.lat(), 6);
-    lonStr = String(gps.location.lng(), 6);
-    Serial.print("Latitude= "); Serial.println(latStr);
-    Serial.print("Longitude= "); Serial.println(lonStr);
-  } else {
-    Serial.println("No GPS data is available");
-    latStr = ""; lonStr = "";
-  }
-}
-
-// ----------------- ALERTING -----------------
-void sendAlert() {
-  String sms_data = "Accident Alert!!\r\n";
-  sms_data += "http://maps.google.com/maps?q=loc:";
-  sms_data += latStr + "," + lonStr;
-  sendSms(sms_data);
-}
-
-void makeCall() {
-  Serial.println("Calling emergency contact...");
-  sim800.println("ATD" + EMERGENCY_PHONE + ";");
-  delay(20000); // keep call for 20s
-  sim800.println("ATH"); // hang up
-  delay(1000);
-}
-
-void sendSms(String text) {
-  if (EMERGENCY_PHONE.length() == 0) {
-    Serial.println("Emergency phone not set.");
-    return;
-  }
-  sim800.print("AT+CMGF=1\r");
-  delay(1000);
-  sim800.print("AT+CMGS=\"" + EMERGENCY_PHONE + "\"\r");
-  delay(1000);
-  sim800.print(text);
-  delay(100);
-  sim800.write(0x1A); // CTRL+Z to send SMS
-  delay(1000);
-  Serial.println("SMS Sent (attempt).");
-}
-
-// ----------------- HELPER: send AT and wait for response -----------------
-bool sendAT(String at_command, String expected_answer, unsigned int timeout) {
-  String response = "";
-  unsigned long previous = millis();
-
-  // flush input
-  while (sim800.available() > 0) sim800.read();
-
-  sim800.println(at_command);
-  do {
-    while (sim800.available() > 0) {
-      char c = sim800.read();
-      response += c;
-      if (response.indexOf(expected_answer) != -1) {
-        Serial.println("AT response: " + response);
-        return true;
-      }
-    }
-  } while (millis() - previous < timeout);
-
-  Serial.println("AT timeout, response: " + response);
-  return false;
-}
+if __name__ == "__main__":
+    main()
 
